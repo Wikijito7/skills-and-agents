@@ -1,3 +1,8 @@
+/**
+ * ILLUSTRATIVE PRESENTATION SNIPPET — applies to BOTH v1 and v2 dialogs.
+ * NOT runnable as-is: `entries`, `fg`, `muted`, `buildBar`, … are intentionally
+ * omitted placeholders. Treat it as layout *shape*, not copy-run code.
+ */
 /** @jsxImportSource @opentui/solid */
 
 // ── Entry with bar (categories, tools, models) ─────────────────────

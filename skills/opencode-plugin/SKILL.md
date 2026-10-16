@@ -1,25 +1,70 @@
 ---
 name: opencode-plugin
-description: "CRITICAL: Load when building, modifying, updating or debugging OpenCode plugins. Missing this = silent failures, broken hooks, and wasted hours. Covers server vs TUI plugin types, event hooks, state API, SolidJS UI slots, config loading, and deployment. Works for ANY plugin type."
+description: "CRITICAL: Load when building, modifying, updating or debugging OpenCode plugins. Missing this = silent failures, broken hooks, and wasted hours. Covers V1 (legacy) vs V2 generation selection, server vs TUI plugin types, domain hooks, Context, keymap/theme/dialog APIs, discovery, config, SolidJS UI slots, and deployment. Works for ANY plugin type."
 ---
 
 ## When to use me
 
-- Building a new OpenCode plugin (server or TUI)
+- Building a new OpenCode plugin (server or TUI) — **first pick the generation (v1 vs v2) below**
 - Debugging an existing plugin that doesn't load or behave correctly
-- Understanding the OpenCode plugin API (`api.state`, `api.client`, `api.event`, slots)
+- Understanding the OpenCode plugin API (v2 `Context`, or the legacy v1 `TuiPluginApi`)
 - Working with OpenTUI SolidJS components in a TUI plugin
-- Configuring plugin registration in `tui.json` or `opencode.json`
+- Configuring plugin registration (`cli.json` / `opencode.json` for v2; `tui.json` for v1)
 
 ## Not intended for
 
 - General SolidJS development outside OpenCode
 - OpenCode SDK client usage (standalone scripts) → use SDK docs directly
 - OpenCode configuration (providers, models, themes) → use `/config`
+- Dialog spacing/layout/interaction rules → use the `opencode-dialogs` skill
 
 ---
 
-## Step 0 — Understand the two plugin systems
+## Step 0 — Choose the generation, then the plugin type (READ FIRST)
+
+OpenCode has **two independent axes**: the **generation** (v1 vs v2) selects the host
+API, and within either generation a module is either a **server plugin** or a
+**TUI plugin**. Pick the generation first.
+
+### V1 vs V2 generation (READ FIRST)
+
+v1 and v2 can be installed side by side (`opencode` vs `opencode2`) but a plugin
+**cannot be shared**: a v1 plugin does not work in v2 and vice-versa. Pick one
+generation per module and **never mix the two host APIs in one runtime adapter**.
+
+| Concern | V1 (legacy) | V2 (current) |
+|---|---|---|
+| Executable | `opencode` | `opencode2` |
+| Package | `@opencode-ai/plugin`, `@opencode-ai/plugin/tui` | `@opencode/plugin`, `@opencode/plugin/tui` (+ `/effect`, `/host`, `/runtime`) |
+| Module shape | server: `export const X = async () => ({ hook map })`; TUI: `export default { id, tui }` | `Plugin.define({ id, setup })` (server **and** TUI) |
+| Server hooks | flat dotted hook map (`"experimental.chat.system.transform"`, `"tool.definition"`, …) | **domain methods**: `ctx.session.hook("context" \| "prompt" \| "compaction" \| …)`, `ctx.tool.hook(...)`, `ctx.event.subscribe(...)` |
+| TUI API | `TuiPluginApi` function argument | `Plugin.Context` obtained in `setup(context)` / `usePlugin()` |
+| TUI config | `tui.json` → `{ "plugin": ["./plugins/x.tsx"] }` | `cli.json` → `{ "$schema": "https://opencode.ai/v2/cli.json", "plugins": [...] }` (**TUI-only**) |
+| Plugin config list | `opencode.json` (server list) | `opencode.json(c)` `plugins` — **core/server package list** (**not** a TUI list; TUI-only is `cli.json`) |
+| Keymap | `api.keymap.registerLayer({ commands, bindings })` | `ctx.keymap.layer(() => KeymapLayer)` |
+| Command fields | `name`, `category`, `namespace:"palette"`, `slashName` | `id`, `group`, `palette:true`, `slash:{ name, aliases?, arguments? }`, `bind` |
+| Theme | `api.theme.current` (drifting prop names) | `ctx.theme` (`ResolvedTheme`, semantic tokens) |
+| Dialog | `api.ui.dialog.replace/setSize/clear` | `ctx.ui.dialog.show(render, onClose?) / set({ size, centered }) / clear()` |
+| Slots | `api.slots.register({ order, slots })` | `ctx.ui.slot(claim)` with `append/prepend/before/after/replace` on a `SlotPath` |
+
+**Config lists (v2) — two lists, two consumers.**
+- `opencode.json(c)` `plugins` is consumed by **core/server**. Every entry names a
+  **server-capable package**; a **local target must be a directory**, not a loose file.
+  A package **directory may expose separate entrypoints** — a server entry
+  (`server.ts` / `index.ts`), a TUI entry (`tui.tsx`), and an rpc entry (`rpc.ts`). Core
+  advertises **`features.tui`**, and when it does the TUI loads that **server-provided
+  TUI entry** (`tui.tsx`). So an `opencode.json(c)` entry does **not** itself directly
+  register a TUI-only plugin — the TUI side is delivered through core's advertised
+  `features.tui`.
+- `cli.json` `plugins` is a **separate, explicit TUI-only list**. It resolves **only**
+  the `tui` entrypoint, so it is how a **TUI-only package** (one with no server entry)
+  is loaded.
+- **Auto-discovery** is independent of both lists: a plugin **directory** under
+  `plugins/` is picked up with no config entry at all.
+
+(`opencode.json` remains the v1 server list.)
+
+### Server vs TUI plugin type (within a generation)
 
 OpenCode has **two separate, mutually exclusive plugin systems**:
 
@@ -32,11 +77,99 @@ OpenCode has **two separate, mutually exclusive plugin systems**:
 | **Config file** | `opencode.json` (optional, npm plugins) | `tui.json` (required) |
 | **Types** | `Plugin` from `@opencode-ai/plugin` | `TuiPlugin`, `TuiPluginModule` from `@opencode-ai/plugin/tui` |
 
-A single module can only be one type. `TuiPluginModule` has `server?: never`.
+Within a **single v1 module**, a module can only be one type — it is a server plugin
+**or** a TUI plugin, never both; the v1 `TuiPluginModule` type encodes this as
+`server?: never`. This is a **v1-only** constraint. A **v2 plugin directory/package**
+may expose **separate entrypoints** — a server entry (`server.ts`, or `index.ts` as the
+fallback), a TUI entry (`tui.tsx`), and an rpc entry (`rpc.ts`) — because each entrypoint
+is a separate module, not a single module that is "both types".
+
+### V2 confirmed facts (OpenCode 2.0.27)
+
+**Server/TUI entrypoints & hooks.**
+- Server: `import { Plugin } from "@opencode/plugin"` → `export default Plugin.define({ id, setup })`.
+  `ctx.session.hook("context")` carries `event.system: SystemPart[]` **and**
+  `event.tools: Record<name,{description,input}>` together. Other hook kinds:
+  `"prompt" | "compaction" | "generate" | "title" | "model.request" | "http.request" | "http.response" | "retry"`.
+- TUI: `import { Plugin } from "@opencode/plugin/tui"` → `Plugin.define({ id, setup })`;
+  `setup(context)` receives the v2 `Context` (also reachable via `usePlugin()` inside a
+  component). The v2 definition is just `{ id: string, setup: (context) => cleanup | void }`.
+- A single **entrypoint module** is either a server or a TUI plugin — never both — but a
+  **v2 plugin directory/package** may expose **separate entrypoints**: a server entry
+  (`server.ts`, or `index.ts` as the fallback), a TUI entry (`tui.tsx`), and an rpc entry
+  (`rpc.ts`). The v1 `TuiPluginModule.server?: never` constraint does **not** apply to v2,
+  and core advertises **`features.tui`** so the TUI can load the server-provided TUI entry.
+
+**Discovery: core (server) vs TUI.**
+- **Core/server discovery** scans the immediate children of **both** `<configDir>/plugin/`
+  **and** `<configDir>/plugins/`, admitting **bare `.ts`/`.js` files AND directories**.
+  A **bare `.tsx` file is NOT auto-discovered** by core — only `.ts`/`.js` files and
+  directories are, so a loose `.tsx` is silently ignored (neither loaded nor an error).
+- **TUI auto-discovery** scans **directories under the plural `<configDir>/plugins/`**
+  only (symlinks-to-directories count) — **never bare files**, `.tsx` included.
+- **Entrypoint resolution** (`Host.resolve`): server entry = `server` first, then `index`;
+  TUI entry = `tui`; rpc = `rpc`.
+- **Local layout:** one directory per plugin under the plural `plugins/`, e.g.
+  `~/.config/opencode/plugins/<name>/index.ts` (or `server.ts`) + `tui.tsx`.
+  A directory is auto-discovered; an explicit local **file** target is rejected.
+- ⚠️ **Avoid v1 loose files in a v2 config root.** Core discovery admits bare `.ts`/`.js`
+  children, so a v1 flat file such as `model-usage-server.ts` in a v2 `plugins/` is
+  auto-discovered and fails to load. A loose v1 **`.tsx`** is not auto-discovered, so it
+  neither loads nor errors. Keep v1 and v2 in **separate config roots** to avoid both
+  the load failure and the silently-ignored file.
+
+**Keymap layer mode.**
+- `KeymapLayer.mode` omitted ⇒ `base`. While a dialog is open the active mode is
+  pushed to `modal`, so a layer left at the `base` default is **inactive exactly when
+  the dialog is visible**.
+- Plugin/command and dialog keymap layers should set `mode: "global"` — v2 has no
+  `api.keymap.registerLayer`; use `ctx.keymap.layer(() => ({ mode: "global", commands }))`.
+
+**Theme.**
+- `context.theme` is **resolved**: action states drop the `$` sigil — `base`,
+  `focused`, `selected`, `hovered`, `pressed`, `disabled` (see the host's `resolvedKey`).
+- **Raw theme definitions** (authored themes) use `$focused` / `$selected`.
+- Theme colors are `RGBA` objects: **pass values through, never string-coerce**.
+
+**Dialogs & Solid.**
+- `context.ui.dialog.show(render, onClose?)`, `.set({ size, centered })`, `.clear()`.
+  Dialog **render callbacks can re-run** whenever a signal read in the body changes.
+- Long-lived controllers must be created through a stable `createOwnedInstance` owner,
+  lazily `.get()`-ed **inside the render callback** (so the owner inherits the dialog's
+  `Keymap.Provider` context and survives re-runs), and `.dispose()`-ed in `onClose`.
+  See the `opencode-dialogs` skill for the full pattern.
+- **`.tsx` vs `.ts` — the OpenCode local plugin-loader transform boundary (2.0.27).**
+  OpenCode 2.0.27's local plugin loader applies its Solid runtime transform to
+  **`.tsx`/`.jsx`** plugin files. A **plugin-local module** that relies on that host
+  rewrite must therefore be named `.tsx`: one that **returns JSX**, **calls
+  Solid/OpenTUI runtime APIs** (`createRoot`, `createEffect`, signals, components),
+  or **has a runtime `solid-js` / `@opentui/solid` import whose code depends on the
+  host's JSX/Solid transform**. A module that is **pure `.ts` helpers** — or whose only
+  `solid-js` import is **type-only** (`import type { JSX } from "solid-js"`) — stays
+  **`.ts`**. This is a boundary of the OpenCode plugin loader, **not** a universal rule
+  that every `solid-js` runtime import requires `.tsx`: a `.ts` module is fine when its
+  Solid code is transformed elsewhere (e.g. a prebuilt/bundled dependency). Code that
+  does need the host transform silently fails to transform if kept in a `.ts` file.
+
+> **Legacy v1 note:** the remainder of this skill documents the **v1** API.
+> Anything using `TuiPluginApi`, `api.state`, `api.event`, `api.keymap.registerLayer`,
+> `api.theme.current`, `api.ui.dialog.replace/setSize`, `TuiPlugin` / `TuiPluginModule`,
+> `tui.json`, or `@opencode-ai/plugin` is **v1-only** and must not be used in a v2 module.
 
 ---
 
-## Step 1 — Server plugin structure
+# ⚠️ V1 LEGACY REFERENCE (deprecated)
+
+Everything from **Step 1** onward documents the **v1** plugin API. Use it only to
+maintain a deprecated v1 adapter; new / v2 work follows Step 0 and the
+`opencode-dialogs` skill. Where the v2 equivalents are known they are cross-referenced;
+v1-only identifiers are tagged **[v1-only]**.
+
+---
+
+## Step 1 — [v1-only] Server plugin structure
+
+> v2 equivalent: `Plugin.define({ id, setup })` + domain hooks (`ctx.session.hook("context")` …). See Step 0.
 
 ```js
 // .opencode/plugins/my-server-plugin.js
@@ -122,7 +255,9 @@ const config = (await configFile.exists())
 
 ---
 
-## Step 2 — TUI plugin structure
+## Step 2 — [v1-only] TUI plugin structure
+
+> v2 equivalent: `Plugin.define({ id, setup })` with a `Plugin.Context` (`context.ui.slot`, `context.keymap.layer`, `context.ui.dialog`). See Step 0.
 
 ```tsx
 // .opencode/plugins/my-tui-plugin.tsx
@@ -156,9 +291,13 @@ const plugin: TuiPluginModule & { id: string } = {
 export default plugin
 ```
 
-### TUI plugin registration in `tui.json`
+### TUI plugin registration in `tui.json` **[v1-only]**
 
-**Critical**: TUI plugins MUST be registered in `tui.json`. They are NOT auto-loaded.
+> v2 replaces `tui.json` with `cli.json` (`{ "$schema": "https://opencode.ai/v2/cli.json", "plugins": [...] }`)
+> for TUI plugins; a v2 plugin **directory** under `plugins/` is auto-discovered and
+> needs no entry. Never point a v2 config at a loose `.tsx` file. See Step 0.
+
+**Critical**: in v1, TUI plugins MUST be registered in `tui.json`. They are NOT auto-loaded.
 
 **Location**: `~/.config/opencode/tui.json` (global) or `.opencode/tui.json` (project).
 
@@ -195,7 +334,9 @@ Use `175` to insert between context and MCP. Use `> 500` to appear below all bui
 
 ---
 
-## Step 3 — TuiPluginApi reference
+## Step 3 — [v1-only] `TuiPluginApi` reference
+
+> v2 equivalent: the `Plugin.Context` surface (`ctx.data`, `ctx.client`, `ctx.keymap`, `ctx.ui`, `ctx.theme`, `ctx.storage`). See Step 0.
 
 | Field | Description |
 |---|---|
@@ -210,7 +351,7 @@ Use `175` to insert between context and MCP. Use `> 500` to appear below all bui
 | `api.lifecycle.onDispose(fn)` | Plugin-level cleanup; returns unregister fn |
 | `api.slots.register(plugin)` | Register UI slots; returns slot id |
 | `api.ui` | `toast()`, `dialog`, `Dialog`, `DialogSelect`, `Slot`, `Prompt` |
-| `api.theme` | Current theme colors (`foreground`, `muted`, etc.) |
+| `api.theme` **[v1-only]** | Current theme colors (`foreground`, `muted`, etc.). v2 uses `context.theme` (`ResolvedTheme`) |
 | `api.command.register(cb)` | Register slash commands; returns unregister fn |
 | `api.route` | Register routes, navigate |
 
@@ -260,6 +401,10 @@ const result = await api.client.session.messages({
 ---
 
 ## Step 4 — SolidJS patterns for TUI plugins
+
+> **Applies to v1 and v2.** The SolidJS rules below are generation-agnostic; only the
+> host API differs. In v2 read events/state from `ctx.data` (`ctx.data.on`, `ctx.data.session…`)
+> instead of `api.event` / `api.state`.
 
 ### Component lifecycle
 
@@ -365,9 +510,11 @@ return (
 
 Use hex strings: `"#ffffff"`, `"#22c55e"`, `"#eab308"`, `"#ef4444"`, `"#888888"`
 
-Access theme colors via `api.theme.current`:
+Access theme colors via `api.theme.current` **[v1-only]** — v2 passes `context.theme`
+(a resolved `ResolvedTheme`) and must **not** string-coerce the `RGBA` values:
 
 ```tsx
+// v1-only
 <text fg={api.theme.current?.foreground ?? "#ffffff"}>Text</text>
 <text fg={api.theme.current?.muted ?? "#888888"}>Dim text</text>
 ```
@@ -423,11 +570,11 @@ await client.app.log({
 
 ## Step 7 — Deployment
 
-### File layout
+### File layout (v1 — loose files)
 
 ```
 ~/.config/opencode/
-├── tui.json                    ← TUI plugin registration
+├── tui.json                    ← [v1-only] TUI plugin registration
 ├── plugins/
 │   ├── my-tui-plugin.tsx       ← TUI plugin (SolidJS)
 │   ├── my-tui-plugin.config.json
@@ -435,6 +582,21 @@ await client.app.log({
 │   ├── my-server-plugin.config.jsonc
 │   └── logs/                   ← .gitignore'd debug logs
 ```
+
+### v2 layout (directory-per-plugin)
+
+```
+~/.config/opencode/               ← SEPARATE config root from v1
+├── cli.json                      ← TUI-only list: { "plugins": [...] }
+├── plugins/
+│   └── my-plugin/                ← auto-discovered directory
+│       ├── index.ts              ← server entry (or server.ts)
+│       └── tui.tsx               ← TUI entry
+```
+
+Do **not** place v1 loose entry files in a v2 `plugins/` root. Core discovery admits
+bare `.ts`/`.js` children and would try (and fail) to load them; a loose `.tsx` is not
+auto-discovered at all. Keep v1 and v2 in **separate config roots**.
 
 ### Sync pattern (dotfiles repo)
 
@@ -458,6 +620,10 @@ Add to root `.gitignore`:
 ---
 
 ## Step 8 — Event types reference
+
+> **V2:** subscribe with `ctx.data.on(type, handler)` / `ctx.data.listen(handler)`; the
+> legacy `api.event.on` below is **[v1-only]**. Payload names are namespaced in v2
+> (`session.created`, `session.compacted`, `config.updated`, …).
 
 > **SyncEvents** are persisted to the DB and replayed to clients when they connect or load a session.
 > **BusEvents** are ephemeral — they fire in real-time only and are NOT replayed for historical sessions.
@@ -772,4 +938,9 @@ Yes. The compaction user message has `UserMessage.model` set just like any other
 - OpenTUI slots: <https://opentui.com/docs/plugins/slots>
 - SDK type definitions: `@opencode-ai/sdk/v2` types
 - TUI plugin types: `@opencode-ai/plugin/tui` types
-- Real examples: this repo's `.config/opencode/plugins/copilot-usage.tsx` and `notifications.js`
+- Real examples: a deployed v2 plugin directory under `plugins/` (e.g.
+  `plugins/<name>/` with `server.ts` + `tui.tsx`), or the deployed v1 flat file
+  `.config/opencode/plugins/notifications.ts` (single-file `export const X = async () => ({ … })`).
+- **`notifications` has no canonical source repository** — it exists only as a
+  deployed copy (not present in the local workspace or the public `Wikijito7` org),
+  so do not look for an upstream `opencode-notifications` repo to `git clone`.

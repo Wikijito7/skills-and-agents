@@ -1,3 +1,7 @@
+/**
+ * V1 (LEGACY) EXAMPLE — uses `@opencode-ai/plugin/tui` + `api.keymap.registerLayer`.
+ * For v2 use `context.keymap.layer(() => ({ mode: "global", commands: [...] }))`.
+ */
 /** @jsxImportSource @opentui/solid */
 import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
 

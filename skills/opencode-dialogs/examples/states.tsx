@@ -1,3 +1,9 @@
+/**
+ * ILLUSTRATIVE PRESENTATION SNIPPET — applies to BOTH v1 and v2 dialogs.
+ * NOT runnable as-is: `fg`, `muted`, `red`, `errorMsg`, … are intentionally
+ * omitted placeholders. Treat it as the *shape* of each state
+ * (loading/error/empty/guard), not runnable code.
+ */
 /** @jsxImportSource @opentui/solid */
 
 // ── Loading ────────────────────────────────────────────────────────
